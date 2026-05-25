@@ -4,6 +4,7 @@ import { requireAuth } from '../auth/middleware.js';
 import { addMember, getPool } from '../data/pools.js';
 import { getInvite, listPendingInvitesForUid, markInviteStatus, tieInviteToUid } from '../data/invites.js';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js';
+import { notify } from '../realtime/events.js';
 
 export const invitesRouter: Router = Router();
 
@@ -66,6 +67,31 @@ invitesRouter.post('/:inviteId/accept', requireAuth, async (req, res, next) => {
     const updatedInvite = await markInviteStatus(invite._id, 'accepted');
     const updatedPool = await getPool(pool._id);
     res.json({ invite: updatedInvite, pool: updatedPool });
+
+    const adminUids = updatedPool ? Object.entries((updatedPool).members)
+      .filter(([, m]) => m.role === 'admin')
+      .map(([uid]) => uid)
+      .filter(uid => uid !== user.uid) : [];
+    void notify({
+      notifications: adminUids.map(adminUid => ({
+        userUid: adminUid,
+        type: 'member_joined',
+        title: 'New member',
+        body: `${user.name} joined "${pool.name}"`,
+        link: `/pools/${pool._id.toHexString()}`,
+        payload: { poolId: pool._id.toHexString(), uid: user.uid },
+      })),
+      pool: {
+        poolId: pool._id.toHexString(),
+        event: 'member.joined',
+        data: { uid: user.uid },
+      },
+      user: {
+        uid: invite.invitedBy,
+        event: 'invite.resolved',
+        data: { inviteId: invite._id.toHexString(), accepted: true },
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -85,6 +111,14 @@ invitesRouter.post('/:inviteId/decline', requireAuth, async (req, res, next) => 
     }
     const updated = await markInviteStatus(loaded.invite._id, 'declined');
     res.json({ invite: updated });
+
+    void notify({
+      user: {
+        uid: loaded.invite.invitedBy,
+        event: 'invite.resolved',
+        data: { inviteId: loaded.invite._id.toHexString(), accepted: false },
+      },
+    });
   } catch (err) {
     next(err);
   }
