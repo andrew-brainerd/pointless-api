@@ -6,11 +6,11 @@ Backend for **Pointless** — a points-betting web app where small private group
 
 ## Status
 
-`v0.1.0` — **Phase A in progress.** Scaffold only: Express 5 + TS + Pino, healthz route, smoke tests, lint/typecheck/test wired. Mongo / Firebase Admin / Pusher / SendGrid are stubbed and come online in later phases (see spec §9).
+`v0.7.0` — **Phases A through E complete; Phase F polish + READMEs done.** Live BE: Firebase Admin auth, pool/invite CRUD with FR-02 authz, full wager state machine in Mongo transactions, SendGrid email invites, Pusher realtime + notifications fan-out, channel-auth endpoint. 94 tests pass. **Pending v1**: the user's one-time Heroku app create + first deploy (F-2).
 
 ## Stack
 
-Node 24 · pnpm · TypeScript (ESM, NodeNext) · Express 5 · MongoDB driver v7 · Firebase Admin (Phase B) · Zod · Pino · Pusher (Phase E) · SendGrid (Phase C) · Vitest + supertest · ESLint 9 flat config · Prettier. Secrets via Infisical (Phase A-3).
+Node 24 · pnpm · TypeScript (ESM, NodeNext) · Express 5 · MongoDB driver v7 · Firebase Admin · Zod · Pino · Pusher · SendGrid · Vitest + supertest + mongodb-memory-server (replica-set for transactions) · ESLint 9 flat config · Prettier. Secrets via Infisical for dev.
 
 ## Setup
 
@@ -49,7 +49,17 @@ The frontend needs the *web* Firebase config (apiKey, authDomain, projectId, app
 
 ## Environment
 
-See [`.env.example`](.env.example) for the full list. Required: `MONGO_URI`, `MONGO_DB_NAME`, `CORS_ALLOWLIST`. Required from Phase B onward: `GOOGLE_APPLICATION_CREDENTIALS`. Required from Phase E onward: `PUSHER_*`. Required from Phase C onward: `SENDGRID_*`.
+See [`.env.example`](.env.example) for the full list. Required in production:
+
+| Var | Notes |
+|---|---|
+| `MONGO_URI` | MongoDB Atlas connection string (replica set for transactions) |
+| `MONGO_DB_NAME` | Database name |
+| `CORS_ALLOWLIST` | Comma-separated frontend origins |
+| `FRONTEND_URL` | Used in invite emails |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Firebase service-account JSON |
+| `PUSHER_APP_ID` / `PUSHER_KEY` / `PUSHER_SECRET` / `PUSHER_CLUSTER` | Realtime; if any are missing the BE no-ops realtime instead of crashing |
+| `SENDGRID_API_KEY` / `SENDGRID_FROM_EMAIL` | Invite emails; same graceful no-op when missing |
 
 ## Infisical
 
@@ -65,14 +75,33 @@ For CI / Docker / Heroku, use a service token: `infisical run --token $INFISICAL
 
 ## Deploy (Heroku)
 
-Heroku app: `pointless-api` (TBD — create with `heroku apps:create pointless-api` and set as the `heroku` git remote).
+One-time setup:
 
 ```bash
-heroku config:set NODE_ENV=production MONGO_URI=... MONGO_DB_NAME=pointless ...   # or use infisical
-pnpm publish                                                                       # = git push heroku HEAD -f
+heroku apps:create pointless-api                # or your chosen name
+heroku git:remote -a pointless-api               # adds the 'heroku' remote
+heroku config:set \
+  NODE_ENV=production \
+  MONGO_URI=... \
+  MONGO_DB_NAME=pointless \
+  CORS_ALLOWLIST=https://your-frontend-domain \
+  FRONTEND_URL=https://your-frontend-domain \
+  GOOGLE_APPLICATION_CREDENTIALS=./prod-admin.json \
+  PUSHER_APP_ID=... PUSHER_KEY=... PUSHER_SECRET=... PUSHER_CLUSTER=us2 \
+  SENDGRID_API_KEY=... SENDGRID_FROM_EMAIL=...
 ```
 
-Heroku's Node.js buildpack auto-detects from `package.json` + `engines.node`. No `Procfile` needed — `npm start` is the default. Provision MongoDB Atlas separately and set `MONGO_URI`.
+The Firebase service-account JSON has to land on disk somewhere Heroku's slug can read. Easiest: commit a `prod-admin.json` in a private branch or use Heroku's [config-file buildpack](https://github.com/elnaposhi/heroku-buildpack-config-file) — your call.
+
+Deploy:
+
+```bash
+pnpm publish                # = git push heroku HEAD -f
+```
+
+The included [`Procfile`](Procfile) declares `web: node dist/server.js`. Heroku's Node buildpack auto-runs `pnpm build` (pre-deploy) given `engines.node: "24"` + `packageManager: pnpm@…`. Provision MongoDB Atlas separately (free M0 tier is enough; must be a replica set so wager transactions work).
+
+Smoke-test after first deploy: hit `https://<app>.herokuapp.com/api/v1/healthz` → `{ status: "ok", ... }`.
 
 ## Sibling repos
 
