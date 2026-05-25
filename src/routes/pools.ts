@@ -26,6 +26,13 @@ import { sendInviteEmail } from '../email/sendgrid.js';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
 import { loadEnv } from '../lib/env.js';
 import { logger } from '../lib/logger.js';
+import { createWagerHandler, handleLeaverWagers, listWagersHandler } from './wagers.js';
+import { notify } from '../realtime/events.js';
+
+const poolAdminUids = (pool: PoolDoc): string[] =>
+  Object.entries(pool.members)
+    .filter(([, m]) => m.role === 'admin')
+    .map(([uid]) => uid);
 
 export const poolsRouter: Router = Router();
 
@@ -178,6 +185,27 @@ poolsRouter.post(
         invite,
         status: created ? 'created' : 'already_invited',
       });
+
+      // Fan-out: notify the invitee (only if they're a known user with a uid).
+      if (created && invitedUid) {
+        void notify({
+          notifications: [
+            {
+              userUid: invitedUid,
+              type: 'pool_invite',
+              title: 'Pool invite',
+              body: `${inviter.name} invited you to "${pool.name}"`,
+              link: `/invites/${invite._id.toHexString()}`,
+              payload: { inviteId: invite._id.toHexString(), poolId: pool._id.toHexString() },
+            },
+          ],
+          user: {
+            uid: invitedUid,
+            event: 'invite.received',
+            data: { inviteId: invite._id.toHexString(), poolId: pool._id.toHexString() },
+          },
+        });
+      }
     } catch (err) {
       next(err);
     }
@@ -244,9 +272,28 @@ poolsRouter.post('/:poolId/leave', requireAuth, requirePoolMember, async (req, r
       );
       return;
     }
+    await handleLeaverWagers(pool._id, uid);
     const updated = await removeMember(pool._id, uid);
     await maybeAutoCleanup(updated);
     res.status(204).end();
+
+    // Notify remaining admins (using pre-leave admin list, minus self).
+    const adminsToNotify = poolAdminUids(pool).filter(a => a !== uid);
+    void notify({
+      notifications: adminsToNotify.map(adminUid => ({
+        userUid: adminUid,
+        type: 'member_left',
+        title: 'Member left',
+        body: `${req.user!.name} left "${pool.name}"`,
+        link: `/pools/${pool._id.toHexString()}`,
+        payload: { poolId: pool._id.toHexString(), uid, voluntary: true },
+      })),
+      pool: {
+        poolId: pool._id.toHexString(),
+        event: 'member.left',
+        data: { uid, voluntary: true },
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -274,9 +321,27 @@ poolsRouter.delete(
         next(conflict('Cannot remove the last admin'));
         return;
       }
+      await handleLeaverWagers(pool._id, targetUid);
       const updated = await removeMember(pool._id, targetUid);
       await maybeAutoCleanup(updated);
       res.status(204).end();
+
+      const adminsToNotify = poolAdminUids(pool).filter(a => a !== targetUid);
+      void notify({
+        notifications: adminsToNotify.map(adminUid => ({
+          userUid: adminUid,
+          type: 'member_left',
+          title: 'Member removed',
+          body: `${req.user!.name} removed a member from "${pool.name}"`,
+          link: `/pools/${pool._id.toHexString()}`,
+          payload: { poolId: pool._id.toHexString(), uid: targetUid, voluntary: false },
+        })),
+        pool: {
+          poolId: pool._id.toHexString(),
+          event: 'member.left',
+          data: { uid: targetUid, voluntary: false },
+        },
+      });
     } catch (err) {
       next(err);
     }
@@ -315,6 +380,10 @@ poolsRouter.patch(
     }
   },
 );
+
+// Pool-scoped wager routes (D-2). Wager-scoped routes live in wagersRouter at /wagers.
+poolsRouter.post('/:poolId/wagers', requireAuth, requirePoolMember, createWagerHandler);
+poolsRouter.get('/:poolId/wagers', requireAuth, requirePoolMember, listWagersHandler);
 
 // AC-05.4: pool with zero members is auto-deleted; pool with zero admins
 // auto-promotes the longest-tenured member to admin.

@@ -1,4 +1,4 @@
-import { MongoClient, type Db } from 'mongodb';
+import { MongoClient, type ClientSession, type Db } from 'mongodb';
 import { loadEnv } from '../lib/env.js';
 import { logger } from '../lib/logger.js';
 
@@ -46,4 +46,27 @@ const ensureIndexes = async (db: Db): Promise<void> => {
   await db.collection('pool_invites').createIndex({ invitedEmail: 1, status: 1 });
   await db.collection('pool_invites').createIndex({ poolId: 1, status: 1 });
   await db.collection('users').createIndex({ email: 1 });
+  await db.collection('wagers').createIndex({ poolId: 1, status: 1 });
+  await db.collection('wagers').createIndex({ poolId: 1, 'participants.uid': 1 });
+  await db
+    .collection('notifications')
+    .createIndex({ userUid: 1, isDismissed: 1, createdAt: -1 });
+};
+
+// FR-04: all wager point movements must be atomic. Wrap an operation in a
+// Mongo transaction; all collection ops inside `fn` should pass `{ session }`.
+export const withTransaction = async <T>(
+  fn: (session: ClientSession) => Promise<T>,
+): Promise<T> => {
+  const client = await getMongoClient();
+  const session = client.startSession();
+  try {
+    let result!: T;
+    await session.withTransaction(async () => {
+      result = await fn(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
 };

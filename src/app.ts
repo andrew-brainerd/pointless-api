@@ -35,14 +35,16 @@ export const createApp = (): Express => {
   );
   app.use(express.json({ limit: '1mb' }));
 
-  app.use(
-    rateLimit({
-      windowMs: 60_000,
-      limit: 120,
-      standardHeaders: 'draft-7',
-      legacyHeaders: false,
-    }),
-  );
+  if (env.NODE_ENV !== 'test') {
+    app.use(
+      rateLimit({
+        windowMs: 60_000,
+        limit: 120,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+      }),
+    );
+  }
 
   app.use('/api/v1', apiRouter);
 
